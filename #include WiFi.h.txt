@@ -1,0 +1,100 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "DHT.h"
+ 
+// --- Definições de pinos e periféricos ---
+#define DHTPIN 4
+#define DHTTYPE DHT11
+ 
+// --- Parâmetros de rede Wi-Fi e API ---
+const char* ssid     = "SENAC-Mesh";
+const char* password = "09080706";
+const char* serverUrl = "http://api.thingspeak.com/update";
+String apiKey = "94FP3LEAA493QRLB";
+ 
+// --- Instanciação do sensor ---
+DHT dht(DHTPIN, DHTTYPE);
+ 
+// --- Controle de tempo não bloqueante ---
+unsigned long ultimoEnvio = 0;
+const unsigned long intervaloEnvio = 20000; // 20s
+ 
+void conectarWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  Serial.print("[Wi-Fi] Conectando");
+  WiFi.begin(ssid, password);
+  int tentativas = 0;
+  while (WiFi.status() != WL_CONNECTED && tentativas < 20) {
+    delay(500);
+    Serial.print(".");
+    tentativas++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[Wi-Fi] Conexão estabelecida!");
+    Serial.print("[Wi-Fi] IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n[Wi-Fi ERRO] Falha ao conectar. Verifique SSID/Senha ou o alcance da rede.");
+  }
+}
+ 
+void setup() {
+  Serial.begin(115200);
+  delay(1000); // Aguarda estabilização da porta serial
+  dht.begin();
+  conectarWiFi();
+}
+ 
+void loop() {
+  if (millis() - ultimoEnvio >= intervaloEnvio) {
+    ultimoEnvio = millis();
+ 
+    // 1. Aquisição dos dados
+    float umidade     = dht.readHumidity();
+    float temperatura = dht.readTemperature();
+ 
+    // 2. Validação e Diagnóstico do Sensor
+    if (isnan(umidade) || isnan(temperatura)) {
+      Serial.println("\n[ERRO SENSOR] Falha na leitura do DHT11!");
+      Serial.println(" -> Verifique se o pino do sinal está correto (GPIO 4).");
+      Serial.println(" -> Confirme a alimentação (3.3V / 5V) e o pino GND.");
+      Serial.println(" -> Verifique o resistor de pull-up (4.7k a 10k entre VCC e Data).");
+      return;
+    }
+ 
+    Serial.printf("[SENSOR] Temp: %.1f°C | Umidade: %.1f%%\n", temperatura, umidade);
+ 
+    // 3. Checagem e Envio via HTTP
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      http.begin(serverUrl);
+      http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+ 
+      String payload = "api_key=" + apiKey
+                     + "&field1=" + String(temperatura, 1)
+                     + "&field2=" + String(umidade, 2);
+ 
+      int httpCode = http.POST(payload);
+ 
+      // 4. Auditoria da resposta do ThingSpeak
+      if (httpCode > 0) {
+        String resp = http.getString();
+        Serial.printf("[HTTP] Status: %d | Resposta: %s\n", httpCode, resp.c_str());
+ 
+        if (resp == "0") {
+          Serial.println("[ALERTA] Envio rejeitado pelo ThingSpeak.");
+          Serial.println(" -> Motivo: Chave de API inválida ou janela mínima de 15s violada.");
+        } else {
+          Serial.printf("[SUCESSO] Dado gravado na entrada #%s do ThingSpeak.\n", resp.c_str());
+        }
+      } else {
+        Serial.printf("[HTTP ERRO] %s (Código: %d)\n", http.errorToString(httpCode).c_str(), httpCode);
+        Serial.println(" -> Verifique se há acesso à internet no roteador.");
+      }
+      http.end();
+    } else {
+      Serial.println("[Wi-Fi ERRO] Sem conexão no momento do envio. Tentando reconectar...");
+      conectarWiFi();
+    }
+  }
+}
